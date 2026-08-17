@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ジェスチャーAR</title>
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.155.0/examples/jsm/"
+      }
+    }
+    </script>
+    <style>
+      * {
+        box-sizing: border-box
+      }
+
+      /*ページ全体*/
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #000000;
+        color: white;
+        font-family: sans-serif;
+      }
+
+      /*Webカメラ映像*/
+      #camera {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+
+        /*鍵のように左右反転する*/
+        transform: scaleX(-1);
+      }
+
+      /*現在の認識状態*/
+      #gesture-status {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+
+        min-width: 280px;
+        padding: 12px 18px;
+        border-radius: 10px;
+        background-color: rgba(0,0,0,0.65);
+
+        text-align: center;
+        font-size: 18px;
+        font-weight: bold;
+
+        z-index: 10;
+      }
+      /*カメラ起動ボタン*/
+      #start-button {
+        position: fixed;
+        left: 50%;
+        bottom: 30px;
+        transform: translateX(-50%);
+
+        padding: 14px 24px;
+        border: none;
+        border-radius: 30px;
+
+        background-color: #e65100;
+        color: white;
+
+        font-size: 16px;
+        font-weight: bold;
+        cursor: pointer;
+
+        z-index: 10;
+      }
+
+      #start-button:active {
+        transform: 
+          translateX(-50%)
+          scale(0.96);
+      }
+
+      /*3Dモデルを重ねる領域*/
+      #three-container {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2;
+      }
+      #three-container canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <!--Webカメラ映像-->
+    <video
+     id="camera"
+     autoplay
+     muted
+     playsinline>
+    </video>
+    
+    <!--3Dモデルを表示する場所-->
+    <div id="three-container"></div>
+
+    <!--現在認識している手の形-->
+    <div id="gesture-status">
+      カメラを起動してください
+    </div>
+
+    <!--カメラ起動ボタン-->
+    <button id="start-button">
+      カメラを起動
+    </button>
+
+    <script type="module">
+      import {
+        GestureRecognizer,
+        FilesetResolver
+      } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+      //Three.jsの3D空間を準備
+      const threeContainer = document.getElementById("three-container");
+      const scene = new THREE.Scene();
+      const threeCamera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth /window.innerHeight,
+        0.1,
+        100
+      );
+
+      threeCamera.position.z = 5;
+
+      const renderer = new THREE.WebGLRenderer({
+        alpha: true,
+        antialias: true
+      });
+
+      renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+      );
+
+      renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio, 2)
+      );
+
+      renderer.setClearColor(0x000000, 0);
+
+      threeContainer.appendChild(renderer.domElement);
+
+      //照明
+      const ambientLight = new THREE.AmbientLight(0xffffff, 2);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 3);
+
+      directionalLight.position.set(3,4,5);
+      scene.add(directionalLight);
+
+      //アヒルを入れるグループ
+      let duck = new THREE.Group();
+      duck.visible = false;
+      scene.add(duck);
+
+      //Duck.glbを読み込む
+      const loader = new GLTFLoader();
+
+      loader.load(
+        "./models/Duck.glb",
+        function (gltf) {
+          const model = gltf.scene;
+
+          //モデルの中心と大きさを調整
+          const box = new THREE.Box3().setFromObject(model);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+
+          const maximumSize = Math.max(
+            size.x,
+            size.y,
+            size.z
+          );
+          const modelScale = 2.5 / maximumSize;
+          model.scale.setScalar(modelScale);
+          model.position.set(
+            -center.x * modelScale,
+            -center.y * modelScale,
+            -center.z * modelScale
+          );
+          duck.add(model);
+          console.log("アヒルを読み込みました");
+        },
+        undefined,
+        function(error){
+          console.error(
+            "アヒルの読み込みに失敗しました",
+            error
+          );
+        }
+      );
+
+      //3D画面を描画し続ける
+      function animateThree(){
+        requestAnimationFrame(animateThree);
+
+        //ピースを認識したときの1回転
+        if (isRotating) {
+          const rotationSpeed = 0.08;
+          duck.rotation.y += rotationSpeed;
+          rotationAmount += rotationSpeed;
+
+          //360度回転したら停止
+          if (rotationAmount >= Math.PI * 2) {
+            duck.rotation.y = 0;
+            rotationAmount = 0;
+            isRotating = false;
+          }
+        }
+        //目標位置へ滑らかに移動
+        duck.position.lerp(duckTargetPosition, 0.2);
+
+        //目標サイズへ滑らかに変化
+        const smoothScale = THREE.MathUtils.lerp(duck.scale.x, duckTargetScale, 0.15);
+        duck.scale.setScalar(smoothScale);
+        duck.rotation.z = THREE.MathUtils.lerp(duck.rotation.z, duckTargetRotationZ, 0.15);
+        renderer.render(scene, threeCamera);
+      }
+
+      const camera = document.getElementById("camera");
+      const startButton = document.getElementById("start-button");
+      const gestureStatus = document.getElementById("gesture-status");
+
+      let gestureRecognizer;
+      let lastVideoTime = -1;
+
+      //前回認識したジェスチャー
+      let previousGestureName = "";
+
+      //アヒルの回転状態
+      let isRotating = false;
+      let rotationAmount = 0;
+
+      //アヒルが移動する目標位置
+      const duckTargetPosition = new THREE.Vector3(0,0,0);
+
+      //アヒルの目標サイズ
+      let duckTargetScale = 1;
+
+      //アヒルの左右の目標角度
+      let duckTargetRotationZ = 0;
+
+      //変数を準備してから3D描画を開始
+       animateThree();
+
+      // 手の形を認識するAIを準備
+      async function prepareGestureRecognizer() {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
+
+        gestureRecognizer =
+          await GestureRecognizer.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath:
+                "https://storage.googleapis.com/mediapipe-tasks/gesture_recognizer/gesture_recognizer.task",
+              delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            numHands: 1
+          });
+     }
+
+      // カメラを起動
+      startButton.addEventListener("click", async function () {
+        try {
+          startButton.disabled = true;
+          gestureStatus.textContent = "手の認識機能を準備中です…";
+
+          await prepareGestureRecognizer();
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+
+        camera.srcObject = stream;
+        await camera.play();
+
+        startButton.style.display = "none";
+        gestureStatus.textContent = "手をカメラに映してください";
+
+        recognizeGesture();
+        } catch (error) {
+          console.error(error);
+          gestureStatus.textContent = "起動できませんでした";
+          startButton.disabled = false;
+
+          alert(
+           "起動できませんでした。カメラの使用許可とインターネット接続を確認してください。"
+          );
+        }
+      });
+
+      //手のひらの位置へアヒルを移動
+        function moveDuckToHand(landmarks){
+          //手首と各指の付け根を使用
+          const palmIndexes = [0, 5, 9, 13, 17];
+
+          let palmX = 0;
+          let palmY = 0;
+
+          //各座標を足す
+          for (const index of palmIndexes) {
+            palmX += landmarks[index].x;
+            palmY += landmarks[index].y;
+          }
+
+          //手のひらの中心を求める
+          palmX /= palmIndexes.length;
+          palmY /= palmIndexes.length;
+          
+          //人差し指側と小指側の付け根
+          const indexBase = landmarks[5];
+          const littleBase = landmarks[17];
+
+          //手のひらの横幅
+          const palmWidth = Math.hypot(
+              indexBase.x - littleBase.x,
+              indexBase.y - littleBase.y
+            );
+          
+          //カメラから見える3D空間の大きさ
+          const distance = threeCamera.position.z;
+
+          const visibleHeight = 2 * Math.tan(
+            THREE.MathUtils.degToRad(
+              threeCamera.fov / 2
+            )
+          )*
+          distance;
+
+          const visibleWidth = visibleHeight * threeCamera.aspect;
+
+          //カメラ映像が左右反転しているためXも反転
+          const threeX = (0.5 - palmX) * visibleWidth;
+          const basicThreeY = (0.5 - palmY) * visibleHeight;
+
+          const upwardOffset = palmWidth * visibleHeight * 1.3;
+          const threeY = basicThreeY + upwardOffset;
+
+          //アヒルの目標位置
+          duckTargetPosition.set(
+            threeX,
+            threeY,
+            0
+          );
+
+            //手が大きく映るほどアヒルも大きくなる
+            duckTargetScale = THREE.MathUtils.clamp(palmWidth * 5, 0.5, 2.2);
+
+          //画面上での手のひらの左右方向
+          const displayDifferenceX = indexBase.x - littleBase.x;
+          const displayDifferenceY = indexBase.y - littleBase.y;
+
+          //手の動きを計算
+          let handTilt = Math.atan2(
+            displayDifferenceY,
+            displayDifferenceX
+          );
+
+          //角度の反転を補正
+          if (handTilt > Math.PI/2) {
+            handTilt -= Math.PI;
+          }
+
+          if (handTilt < -Math.PI/2){
+            handTilt += Math.PI;
+          }
+
+          //最大約34度まで傾ける
+          duckTargetRotationZ = THREE.MathUtils.clamp(
+            handTilt, -0.6, 0.6
+          );
+        }
+
+      // カメラ映像を繰り返し調べる
+      function recognizeGesture() {
+        if (
+          gestureRecognizer &&
+          camera.readyState >= 2 &&
+          camera.currentTime !== lastVideoTime
+        ) {
+          lastVideoTime = camera.currentTime;
+
+          const result = gestureRecognizer.recognizeForVideo(
+            camera,
+            performance.now()
+          );
+          //手の位置へアヒルを移動
+          if (
+            result.landmarks &&
+            result.landmarks.length > 0
+          ) {
+            moveDuckToHand(result.landmarks[0]);
+          }
+
+        if (result.gestures.length > 0) {
+            const gestureName =
+            result.gestures[0][0].categoryName;
+
+        if (gestureName === "Closed_Fist") {
+            gestureStatus.textContent = "グーを認識しました ✊";
+            //新しくグーに変わったとき
+            if (previousGestureName !== "Closed_Fist") {
+              duck.visible = false;
+            }  
+          } else if (gestureName === "Open_Palm") {
+              gestureStatus.textContent = "開いた手を認識しました ✋";
+              //新しく開いた手に変わったとき
+              if (previousGestureName !=="Open_Palm"){
+                duck.visible = true;
+              }
+            } else if (gestureName === "Victory") {
+              gestureStatus.textContent = "ピースを認識しました ✌️";
+              //新しくピースに変わったときだけ回転開始
+              if (
+                previousGestureName !== "Victory" && !isRotating
+              ) {
+                duck.visible = true;
+                rotationAmount = 0;
+                isRotating = true;
+              }
+            } else {
+              gestureStatus.textContent = "手を認識しています";
+            }
+            //今回のジェスチャーを保存
+            previousGestureName = gestureName;
+
+            } else {
+                gestureStatus.textContent = "手をカメラに映してください";
+
+                previousGestureName = "";
+            }
+        }
+
+      requestAnimationFrame(recognizeGesture);
+      }
+      window.addEventListener("resize", function() {
+        threeCamera.aspect = window.innerWidth / window.innerHeight;
+        threeCamera.updateProjectionMatrix();
+        renderer.setSize(
+          window.innerWidth,
+          window.innerHeight
+        );
+      });
+    </script>
+  </body>
+</html>
